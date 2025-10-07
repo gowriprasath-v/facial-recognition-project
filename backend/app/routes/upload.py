@@ -1,285 +1,312 @@
+import os
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from app.database import get_db
-from app.utils.file_handler import FileHandler
-from app.utils.validators import validate_file
+from werkzeug.utils import secure_filename
+import uuid
+from pymongo import MongoClient
 from bson import ObjectId
+from app.utils.ml_processor import process_profile_photo, process_group_photo, test_ml_setup
 import logging
-from typing import List, Dict
-import os
 
 logger = logging.getLogger(__name__)
+
 upload_bp = Blueprint('upload', __name__)
+
+def allowed_file(filename):
+    """Check if file extension is allowed"""
+    ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def get_db():
+    """Get database connection with better error handling"""
+    try:
+        mongo_uri = current_app.config.get('MONGO_URI')
+        if not mongo_uri:
+            logger.error("MONGO_URI not found in app config")
+            return None
+            
+        client = MongoClient(mongo_uri)
+        # Test connection
+        client.server_info()
+        return client.get_default_database()
+    except Exception as e:
+        logger.error(f"Database connection error: {e}")
+        return None
+
+@upload_bp.route('/test-ml', methods=['GET'])
+@jwt_required()
+def test_ml():
+    """Test ML setup endpoint"""
+    try:
+        result = test_ml_setup()
+        
+        # Also test database connection
+        db = get_db()
+        db_status = db is not None
+        
+        result['database_available'] = db_status
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'ML setup test completed',
+            'data': result
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'ML test failed: {str(e)}'
+        }), 500
 
 @upload_bp.route('/profile', methods=['POST'])
 @jwt_required()
 def upload_profile():
-    """Upload and process profile photo with ML"""
+    """Upload and process profile photo"""
     try:
+        # Get current user
         user_id = get_jwt_identity()
-        logger.info(f"Profile upload request from user: {user_id}")
+        if not user_id:
+            return jsonify({
+                'status': 'error',
+                'message': 'User not authenticated'
+            }), 401
         
+        # Check if file is in request
         if 'file' not in request.files:
-            return jsonify({'status': 'error', 'message': 'No file provided'}), 400
+            return jsonify({
+                'status': 'error',
+                'message': 'No file provided'
+            }), 400
         
         file = request.files['file']
-        
-        # Validate file
-        valid, message = validate_file(file, current_app.config['ALLOWED_EXTENSIONS'])
-        if not valid:
-            logger.warning(f"Invalid file upload attempt: {message}")
-            return jsonify({'status': 'error', 'message': message}), 400
-        
-        # Save file
-        file_handler = FileHandler(current_app.config['UPLOAD_FOLDER'])
-        success, filepath, filename = file_handler.save_profile_photo(file, user_id)
-        
-        if not success:
-            logger.error(f"File save failed: {filepath}")
-            return jsonify({'status': 'error', 'message': f'File save failed: {filepath}'}), 500
-        
-        # Process with ML
-        from app.utils.ml_processor import process_profile_photo
-        ml_result = process_profile_photo(filepath, user_id)
-        
-        if not ml_result['success']:
-            # Clean up uploaded file if ML processing fails
-            if os.path.exists(filepath):
-                os.remove(filepath)
-            logger.error(f"ML processing failed for user {user_id}: {ml_result['message']}")
+        if file.filename == '':
             return jsonify({
-                'status': 'error', 
-                'message': f'ML processing failed: {ml_result["message"]}'
+                'status': 'error',
+                'message': 'No file selected'
+            }), 400
+        
+        # Validate file type
+        if not allowed_file(file.filename):
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid file type. Allowed: png, jpg, jpeg, gif, bmp'
+            }), 400
+        
+        # Get database connection
+        db = get_db()
+        if db is None:
+            return jsonify({
+                'status': 'error',
+                'message': 'Database connection failed'
             }), 500
         
-        # Update user record with photo path and embedding
-        db = get_db()
-        update_result = db.users.update_one(
-            {'_id': ObjectId(user_id)},
-            {
-                '$set': {
-                    'profile_photo': filepath,
-                    'face_embedding': ml_result['embedding'],
-                    'profile_processed': True,
-                    'profile_uploaded_at': datetime.utcnow()
+        # Generate unique filename
+        file_extension = file.filename.rsplit('.', 1)[1].lower()
+        filename = f"{user_id}_{uuid.uuid4().hex}.{file_extension}"
+        
+        # Ensure upload directory exists
+        upload_dir = os.path.join(current_app.config['UPLOAD_FOLDER'], 'profiles')
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        # Save file
+        filepath = os.path.join(upload_dir, filename)
+        file.save(filepath)
+        logger.info(f"✅ Profile photo saved: {filepath}")
+        
+        # Process the image with ML
+        ml_result = process_profile_photo(filepath, user_id)
+        
+        if ml_result is None:
+            # Remove the saved file if processing failed
+            try:
+                os.remove(filepath)
+            except:
+                pass
+            
+            return jsonify({
+                'status': 'error',
+                'message': 'No face detected in the uploaded image. Please upload a clear photo with a visible face.'
+            }), 400
+        
+        # Update user document with face embedding
+        try:
+            db.users.update_one(
+                {'_id': ObjectId(user_id)},
+                {
+                    '$set': {
+                        'profile_photo': filename,
+                        'face_embedding': ml_result['embedding'],
+                        'face_confidence': ml_result['confidence']
+                    }
                 }
-            }
-        )
-        
-        if update_result.modified_count == 0:
-            logger.warning(f"User update failed for user: {user_id}")
-        
-        logger.info(f"Profile photo processed successfully for user: {user_id}")
+            )
+            logger.info(f"✅ User profile updated with embedding")
+            
+        except Exception as db_error:
+            logger.error(f"❌ Database update error: {db_error}")
+            # Don't fail the request, but log the error
         
         return jsonify({
             'status': 'success',
             'message': 'Profile photo uploaded and processed successfully',
             'data': {
                 'filename': filename,
-                'ml_message': ml_result['message'],
-                'embedding_length': len(ml_result['embedding']),
-                'face_detected': ml_result.get('face_detected', True)
+                'faces_detected': ml_result['faces_detected'],
+                'confidence': round(ml_result['confidence'], 3),
+                'embedding_generated': True
             }
         }), 200
         
     except Exception as e:
-        logger.error(f"Profile upload error: {e}")
-        return jsonify({'status': 'error', 'message': f'Upload failed: {str(e)}'}), 500
+        logger.error(f"❌ Profile upload error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Upload failed: {str(e)}'
+        }), 500
 
 @upload_bp.route('/group', methods=['POST'])
 @jwt_required()
 def upload_group():
-    """Upload and process group photo with ML"""
+    """Upload and process group photo"""
     try:
+        # Get current user
         user_id = get_jwt_identity()
-        logger.info(f"Group photo upload request from user: {user_id}")
-        
-        if 'file' not in request.files:
-            return jsonify({'status': 'error', 'message': 'No file provided'}), 400
-        
-        file = request.files['file']
-        
-        # Validate file
-        valid, message = validate_file(file, current_app.config['ALLOWED_EXTENSIONS'])
-        if not valid:
-            logger.warning(f"Invalid group file upload: {message}")
-            return jsonify({'status': 'error', 'message': message}), 400
-        
-        # Save file
-        file_handler = FileHandler(current_app.config['UPLOAD_FOLDER'])
-        success, filepath, filename = file_handler.save_group_photo(file, user_id)
-        
-        if not success:
-            logger.error(f"Group file save failed: {filepath}")
-            return jsonify({'status': 'error', 'message': f'File save failed: {filepath}'}), 500
-        
-        # Create initial group photo record
-        from datetime import datetime
-        db = get_db()
-        group_data = {
-            'filename': filename,
-            'filepath': filepath,
-            'uploaded_by': user_id,
-            'uploaded_at': datetime.utcnow(),
-            'faces_detected': [],
-            'processed': False,
-            'processing_status': 'pending'
-        }
-        
-        result = db.group_photos.insert_one(group_data)
-        photo_id = str(result.inserted_id)
-        
-        # Process with ML
-        from app.utils.ml_processor import process_group_photo
-        ml_result = process_group_photo(filepath, photo_id)
-        
-        if not ml_result['success']:
-            # Update status to failed but keep the record
-            db.group_photos.update_one(
-                {'_id': result.inserted_id},
-                {'$set': {'processing_status': 'failed', 'error_message': ml_result['message']}}
-            )
-            logger.error(f"ML processing failed for group photo {photo_id}: {ml_result['message']}")
+        if not user_id:
             return jsonify({
                 'status': 'error',
-                'message': f'ML processing failed: {ml_result["message"]}',
-                'data': {'photo_id': photo_id, 'filename': filename}
+                'message': 'User not authenticated'
+            }), 401
+        
+        # Check if file is in request
+        if 'file' not in request.files:
+            return jsonify({
+                'status': 'error',
+                'message': 'No file provided'
+            }), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({
+                'status': 'error',
+                'message': 'No file selected'
+            }), 400
+        
+        # Validate file type
+        if not allowed_file(file.filename):
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid file type. Allowed: png, jpg, jpeg, gif, bmp'
+            }), 400
+        
+        # Get database connection
+        db = get_db()
+        if db is None:
+            return jsonify({
+                'status': 'error',
+                'message': 'Database connection failed'
             }), 500
         
-        # Run face matching
-        matches_found = run_face_matching(photo_id, ml_result['faces_data'])
+        # Generate unique filename
+        file_extension = file.filename.rsplit('.', 1)[1].lower()
+        filename = f"group_{uuid.uuid4().hex}.{file_extension}"
         
-        # Update group photo with ML results
-        db.group_photos.update_one(
-            {'_id': result.inserted_id},
-            {
-                '$set': {
-                    'faces_detected': ml_result['faces_data'],
-                    'processed': True,
-                    'processing_status': 'completed',
-                    'total_faces': len(ml_result['faces_data']),
-                    'total_matches': matches_found,
-                    'processed_at': datetime.utcnow()
-                }
-            }
-        )
+        # Ensure upload directory exists
+        upload_dir = os.path.join(current_app.config['UPLOAD_FOLDER'], 'groups')
+        os.makedirs(upload_dir, exist_ok=True)
         
-        logger.info(f"Group photo processed successfully: {photo_id}, faces: {len(ml_result['faces_data'])}, matches: {matches_found}")
+        # Save file
+        filepath = os.path.join(upload_dir, filename)
+        file.save(filepath)
+        logger.info(f"✅ Group photo saved: {filepath}")
+        
+        # Create group photo document in database
+        from datetime import datetime
+        group_photo_doc = {
+            'filename': filename,
+            'uploaded_by': ObjectId(user_id),
+            'upload_date': datetime.utcnow(),
+            'processed': False,
+            'faces_detected': [],
+            'matches_count': 0,
+            'matched_users': []
+        }
+        
+        insert_result = db.group_photos.insert_one(group_photo_doc)
+        photo_id = insert_result.inserted_id
+        logger.info(f"✅ Group photo document created: {photo_id}")
+        
+        # Process the image with ML
+        ml_result = process_group_photo(filepath, photo_id, db)
         
         return jsonify({
             'status': 'success',
-            'message': 'Group photo uploaded and processed successfully',
+            'message': 'Group photo uploaded and processed',
             'data': {
-                'photo_id': photo_id,
+                'photo_id': str(photo_id),
                 'filename': filename,
-                'faces_detected': len(ml_result['faces_data']),
-                'matches_found': matches_found,
-                'ml_message': ml_result['message']
+                'faces_detected': ml_result['faces_detected'],
+                'matches_found': ml_result['matches_found'],
+                'matched_users': ml_result['matched_users'],
+                'processing_success': ml_result['processing_success'],
+                'error': ml_result['error']
             }
         }), 200
         
     except Exception as e:
-        logger.error(f"Group upload error: {e}")
-        return jsonify({'status': 'error', 'message': f'Upload failed: {str(e)}'}), 500
+        logger.error(f"❌ Group upload error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Upload failed: {str(e)}'
+        }), 500
 
-def run_face_matching(photo_id: str, faces_data: List[Dict]) -> int:
-    """
-    Run face matching for a group photo against all user profiles
-    
-    Args:
-        photo_id: Group photo ID
-        faces_data: List of detected faces with embeddings
-        
-    Returns:
-        Total number of matches found
-    """
-    try:
-        db = get_db()
-        
-        # Get all users with profile embeddings
-        users_with_profiles = list(db.users.find({
-            'face_embedding': {'$exists': True, '$ne': None},
-            'profile_processed': True
-        }))
-        
-        if not users_with_profiles:
-            logger.info("No users with profile embeddings found for matching")
-            return 0
-        
-        from app.utils.ml_processor import find_face_matches
-        total_matches = 0
-        
-        logger.info(f"Starting face matching for photo {photo_id} against {len(users_with_profiles)} users")
-        
-        # For each user, find matches in this group photo
-        for user in users_with_profiles:
-            user_id = str(user['_id'])
-            user_embedding = user['face_embedding']
-            username = user.get('username', 'unknown')
-            
-            matches = find_face_matches(user_embedding, faces_data)
-            
-            if matches:
-                logger.info(f"Found {len(matches)} matches for user {username}")
-                
-                # Update each matched face with user info
-                for match in matches:
-                    face_index = match['face_index']
-                    
-                    # Add user match to this face
-                    db.group_photos.update_one(
-                        {'_id': ObjectId(photo_id)},
-                        {
-                            '$push': {
-                                f'faces_detected.{face_index}.matched_users': {
-                                    'user_id': user_id,
-                                    'username': username,
-                                    'similarity_score': match['similarity_score'],
-                                    'confidence': match['confidence'],
-                                    'matched_at': datetime.utcnow()
-                                }
-                            }
-                        }
-                    )
-                
-                total_matches += len(matches)
-        
-        logger.info(f"Face matching completed for photo {photo_id}: {total_matches} total matches")
-        return total_matches
-        
-    except Exception as e:
-        logger.error(f"Error in face matching for photo {photo_id}: {e}")
-        return 0
-
-@upload_bp.route('/status', methods=['GET'])
+@upload_bp.route('/my-photos', methods=['GET'])
 @jwt_required()
-def get_upload_status():
-    """Get upload status for current user"""
+def get_my_photos():
+    """Get photos that contain the current user"""
     try:
         user_id = get_jwt_identity()
+        
+        # Get database connection
         db = get_db()
+        if db is None:
+            return jsonify({
+                'status': 'error',
+                'message': 'Database connection failed'
+            }), 500
         
-        user = db.users.find_one({'_id': ObjectId(user_id)})
-        if not user:
-            return jsonify({'status': 'error', 'message': 'User not found'}), 404
-        
-        # Count user's uploads
-        group_photos_count = db.group_photos.count_documents({'uploaded_by': user_id})
-        processed_photos_count = db.group_photos.count_documents({
-            'uploaded_by': user_id,
+        # Find group photos where user appears
+        matched_photos = list(db.group_photos.find({
+            'matched_users.user_id': user_id,
             'processed': True
-        })
+        }))
+        
+        # Format response
+        photos_data = []
+        for photo in matched_photos:
+            # Find user's similarity score in this photo
+            user_match = next((match for match in photo.get('matched_users', []) 
+                             if match['user_id'] == user_id), None)
+            
+            photos_data.append({
+                'photo_id': str(photo['_id']),
+                'filename': photo['filename'],
+                'upload_date': photo.get('upload_date'),
+                'faces_detected': len(photo.get('faces_detected', [])),
+                'matches_found': photo.get('matches_count', 0),
+                'similarity_score': user_match['similarity'] if user_match else None
+            })
         
         return jsonify({
             'status': 'success',
+            'message': f'Found {len(photos_data)} photos containing you',
             'data': {
-                'has_profile_photo': user.get('profile_processed', False),
-                'profile_photo_path': user.get('profile_photo'),
-                'group_photos_uploaded': group_photos_count,
-                'group_photos_processed': processed_photos_count
+                'photos': photos_data,
+                'total_count': len(photos_data)
             }
         }), 200
         
     except Exception as e:
-        logger.error(f"Upload status error: {e}")
-        return jsonify({'status': 'error', 'message': f'Failed to get status: {str(e)}'}), 500
+        logger.error(f"❌ Get photos error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Failed to retrieve photos: {str(e)}'
+        }), 500
