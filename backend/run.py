@@ -12,6 +12,13 @@ def main():
     print(f"Environment: {config_name}")
     print("Server: http://localhost:5000")
     print("Health: http://localhost:5000/api/health")
+    print("Endpoints:")
+    print("- POST /api/auth/register")
+    print("- POST /api/auth/login")  
+    print("- GET  /api/auth/profile")
+    print("- POST /api/upload/profile")
+    print("- POST /api/upload/group")
+    print("- GET  /api/photos/my-photos")
     print("=" * 50)
     
     app.run(

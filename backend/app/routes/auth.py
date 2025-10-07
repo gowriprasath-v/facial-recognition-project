@@ -4,14 +4,11 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from app.database import get_db
 from app.utils.validators import UserRegistrationSchema, UserLoginSchema, validate_request_data
 from bson import ObjectId
-import logging
 
-logger = logging.getLogger(__name__)
 auth_bp = Blueprint('auth', __name__)
 
 @auth_bp.route('/register', methods=['POST'])
 def register():
-    """Register new user"""
     try:
         data = request.get_json() or {}
         
@@ -38,8 +35,6 @@ def register():
         result = db.users.insert_one(user_data)
         access_token = create_access_token(identity=str(result.inserted_id))
         
-        logger.info(f"User registered: {validated_data['username']}")
-        
         return jsonify({
             'status': 'success',
             'message': 'User registered successfully',
@@ -50,12 +45,10 @@ def register():
         }), 201
         
     except Exception as e:
-        logger.error(f"Registration error: {e}")
-        return jsonify({'status': 'error', 'message': 'Registration failed'}), 500
+        return jsonify({'status': 'error', 'message': f'Registration failed: {str(e)}'}), 500
 
 @auth_bp.route('/login', methods=['POST'])
 def login():
-    """User login"""
     try:
         data = request.get_json() or {}
         
@@ -72,8 +65,6 @@ def login():
         
         access_token = create_access_token(identity=str(user['_id']))
         
-        logger.info(f"User logged in: {validated_data['username']}")
-        
         return jsonify({
             'status': 'success',
             'message': 'Login successful',
@@ -85,13 +76,11 @@ def login():
         }), 200
         
     except Exception as e:
-        logger.error(f"Login error: {e}")
-        return jsonify({'status': 'error', 'message': 'Login failed'}), 500
+        return jsonify({'status': 'error', 'message': f'Login failed: {str(e)}'}), 500
 
 @auth_bp.route('/profile', methods=['GET'])
 @jwt_required()
 def get_profile():
-    """Get user profile"""
     try:
         user_id = get_jwt_identity()
         db = get_db()
@@ -111,5 +100,4 @@ def get_profile():
         }), 200
         
     except Exception as e:
-        logger.error(f"Profile fetch error: {e}")
-        return jsonify({'status': 'error', 'message': 'Failed to fetch profile'}), 500
+        return jsonify({'status': 'error', 'message': f'Profile fetch failed: {str(e)}'}), 500

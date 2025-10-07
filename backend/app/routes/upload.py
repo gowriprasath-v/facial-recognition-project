@@ -4,15 +4,12 @@ from app.database import get_db
 from app.utils.file_handler import FileHandler
 from app.utils.validators import validate_file
 from bson import ObjectId
-import logging
 
-logger = logging.getLogger(__name__)
 upload_bp = Blueprint('upload', __name__)
 
 @upload_bp.route('/profile', methods=['POST'])
 @jwt_required()
 def upload_profile():
-    """Upload profile photo"""
     try:
         user_id = get_jwt_identity()
         
@@ -40,8 +37,6 @@ def upload_profile():
             {'$set': {'profile_photo': filepath}}
         )
         
-        logger.info(f"Profile photo uploaded for user: {user_id}")
-        
         return jsonify({
             'status': 'success',
             'message': 'Profile photo uploaded successfully',
@@ -49,13 +44,11 @@ def upload_profile():
         }), 200
         
     except Exception as e:
-        logger.error(f"Profile upload error: {e}")
-        return jsonify({'status': 'error', 'message': 'Upload failed'}), 500
+        return jsonify({'status': 'error', 'message': f'Upload failed: {str(e)}'}), 500
 
 @upload_bp.route('/group', methods=['POST'])
 @jwt_required()
 def upload_group():
-    """Upload group photo"""
     try:
         user_id = get_jwt_identity()
         
@@ -88,8 +81,6 @@ def upload_group():
         
         result = db.group_photos.insert_one(group_data)
         
-        logger.info(f"Group photo uploaded: {filename}")
-        
         return jsonify({
             'status': 'success',
             'message': 'Group photo uploaded successfully',
@@ -100,5 +91,4 @@ def upload_group():
         }), 200
         
     except Exception as e:
-        logger.error(f"Group upload error: {e}")
-        return jsonify({'status': 'error', 'message': 'Upload failed'}), 500
+        return jsonify({'status': 'error', 'message': f'Upload failed: {str(e)}'}), 500
