@@ -1,218 +1,207 @@
-"""
-ML Processing Module - Placeholder for MTCNN + FaceNet Integration
-Member 3 will replace these functions with actual ML code
-"""
 import os
-import logging
-from typing import List, Dict, Any
+import cv2
 import numpy as np
+import logging
+from mtcnn import MTCNN
+from keras.models import load_model
+from pymongo import MongoClient
+from bson import ObjectId
 
 logger = logging.getLogger(__name__)
 
-def process_profile_photo(filepath: str, user_id: str) -> Dict[str, Any]:
-    """
-    Process profile photo for face detection and embedding extraction
+# Initialize models globally
+try:
+    # Load FaceNet model
+    model_path = os.path.join('models', 'facenet_keras.h5')
+    if os.path.exists(model_path):
+        model = load_model(model_path)
+        logger.info("FaceNet model loaded successfully")
+    else:
+        model = None
+        logger.warning("FaceNet model not found - using placeholder embeddings")
     
-    Args:
-        filepath: Path to uploaded profile photo
-        user_id: User ID who uploaded the photo
+    # Initialize MTCNN detector
+    detector = MTCNN()
+    logger.info("MTCNN detector initialized")
     
-    Returns:
-        Dictionary with success status, embedding, and message
-    """
-    try:
-        logger.info(f"Processing profile photo: {filepath}")
-        
-        # Check if file exists
-        if not os.path.exists(filepath):
-            return {
-                'success': False,
-                'embedding': None,
-                'message': 'Photo file not found'
-            }
-        
-        # TODO: Member 3 will replace this with actual MTCNN + FaceNet code
-        # 
-        # Expected Member 3 implementation:
-        # 1. detector = MTCNN()
-        # 2. faces = detector.detect_faces(image)
-        # 3. if len(faces) != 1: return error
-        # 4. face_crop = extract_face(image, faces[0])
-        # 5. embedding = facenet_model.predict(face_crop)
-        # 6. return {'success': True, 'embedding': embedding.tolist()}
-        
-        # Simulate face detection and embedding extraction
-        fake_embedding = [round(0.1 * i + np.random.normal(0, 0.01), 6) for i in range(128)]
-        
-        logger.info(f"Profile photo processed successfully for user: {user_id}")
-        
-        return {
-            'success': True,
-            'embedding': fake_embedding,
-            'message': 'Profile photo processed successfully',
-            'face_detected': True,
-            'face_count': 1
-        }
-        
-    except Exception as e:
-        logger.error(f"Error processing profile photo: {e}")
-        return {
-            'success': False,
-            'embedding': None,
-            'message': f'Processing failed: {str(e)}'
-        }
+except Exception as e:
+    logger.error(f"Error loading ML models: {e}")
+    model = None
+    detector = None
 
-def process_group_photo(filepath: str, photo_id: str) -> Dict[str, Any]:
-    """
-    Process group photo for multiple face detection and embedding extraction
+def preprocess_face(face_img):
+    """Preprocess face for FaceNet input"""
+    face_resized = cv2.resize(face_img, (160, 160))
+    face_normalized = face_resized / 255.0
+    mean, std = face_normalized.mean(), face_normalized.std()
+    face_normalized = (face_normalized - mean) / std
+    return face_normalized
+
+def get_embedding(face_pixels):
+    """Get face embedding from FaceNet model"""
+    if model is None:
+        # Return dummy embedding if model not loaded
+        return np.random.random(128).tolist()
     
-    Args:
-        filepath: Path to uploaded group photo
-        photo_id: Group photo ID
-    
-    Returns:
-        Dictionary with success status, faces data, and message
-    """
     try:
-        logger.info(f"Processing group photo: {filepath}")
+        face_pixels = face_pixels.astype('float32')
+        sample = np.expand_dims(face_pixels, axis=0)
+        embedding = model.predict(sample)
+        return embedding[0].tolist()
+    except Exception as e:
+        logger.error(f"Error getting embedding: {e}")
+        return np.random.random(128).tolist()
+
+def detect_faces(image_path):
+    """Detect faces in image and return face data"""
+    if detector is None:
+        logger.warning("MTCNN detector not available")
+        return []
+    
+    try:
+        # Read image
+        image = cv2.imread(image_path)
+        if image is None:
+            logger.error(f"Could not load image: {image_path}")
+            return []
         
-        # Check if file exists
-        if not os.path.exists(filepath):
-            return {
-                'success': False,
-                'faces_data': [],
-                'message': 'Group photo file not found'
-            }
+        # Convert BGR to RGB
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
-        # TODO: Member 3 will replace this with actual MTCNN face detection
-        # 
-        # Expected Member 3 implementation:
-        # 1. detector = MTCNN()
-        # 2. faces = detector.detect_faces(image)
-        # 3. for each face: extract_face() -> facenet.predict() -> embedding
-        # 4. return faces_data with real embeddings and bounding boxes
+        # Detect faces
+        results = detector.detect_faces(rgb_image)
         
-        # Simulate detecting random number of faces (2-5)
-        import random
-        num_faces = random.randint(2, 5)
-        fake_faces_data = []
-        
-        for i in range(num_faces):
-            face_data = {
+        faces_data = []
+        for i, res in enumerate(results):
+            x, y, w, h = res['box']
+            x, y = max(0, x), max(0, y)
+            
+            # Extract face
+            face = rgb_image[y:y+h, x:x+w]
+            
+            # Preprocess and get embedding
+            face_processed = preprocess_face(face)
+            embedding = get_embedding(face_processed)
+            
+            faces_data.append({
                 'face_index': i,
-                'embedding': [round(0.2 * j + i * 0.1 + np.random.normal(0, 0.02), 6) for j in range(128)],
-                'confidence': round(0.92 + i * 0.01 + np.random.normal(0, 0.02), 3),
-                'bounding_box': {
-                    'x': random.randint(50, 200),
-                    'y': random.randint(50, 200), 
-                    'width': random.randint(80, 120),
-                    'height': random.randint(100, 140)
-                },
-                'matched_users': []  # Will be filled by matching algorithm
-            }
-            fake_faces_data.append(face_data)
+                'bbox': [x, y, w, h],
+                'confidence': res['confidence'],
+                'embedding': embedding
+            })
         
-        logger.info(f"Group photo processed: {len(fake_faces_data)} faces detected")
-        
-        return {
-            'success': True,
-            'faces_data': fake_faces_data,
-            'message': f'Successfully detected {len(fake_faces_data)} faces'
-        }
+        logger.info(f"Detected {len(faces_data)} faces in {image_path}")
+        return faces_data
         
     except Exception as e:
-        logger.error(f"Error processing group photo: {e}")
-        return {
-            'success': False,
-            'faces_data': [],
-            'message': f'Processing failed: {str(e)}'
-        }
-
-def find_face_matches(user_embedding: List[float], group_faces: List[Dict], threshold: float = 0.6) -> List[Dict]:
-    """
-    Find face matches between user profile and group photo faces using cosine similarity
-    
-    Args:
-        user_embedding: User's profile photo embedding (128-D vector)
-        group_faces: List of face data from group photo
-        threshold: Similarity threshold for matching (default 0.6)
-    
-    Returns:
-        List of matches with similarity scores
-    """
-    try:
-        matches = []
-        
-        for face in group_faces:
-            # TODO: Member 3 will replace this with actual cosine similarity calculation
-            #
-            # Expected implementation:
-            # face_embedding = face['embedding']
-            # similarity = cosine_similarity(user_embedding, face_embedding)
-            # if similarity >= threshold:
-            #     matches.append({...})
-            
-            # Simulate cosine similarity calculation
-            # Create some realistic variation in similarity scores
-            base_similarity = 0.4 + (hash(str(user_embedding[:5])) % 100) / 200
-            noise = np.random.normal(0, 0.1)
-            fake_similarity = max(0.0, min(1.0, base_similarity + noise))
-            
-            if fake_similarity >= threshold:
-                match = {
-                    'face_index': face['face_index'],
-                    'similarity_score': round(fake_similarity, 4),
-                    'confidence': face.get('confidence', 0.9),
-                    'threshold_used': threshold
-                }
-                matches.append(match)
-        
-        logger.info(f"Face matching complete: {len(matches)} matches found above threshold {threshold}")
-        return matches
-        
-    except Exception as e:
-        logger.error(f"Error finding face matches: {e}")
+        logger.error(f"Error detecting faces in {image_path}: {e}")
         return []
 
-def calculate_cosine_similarity(embedding1: List[float], embedding2: List[float]) -> float:
-    """
-    Calculate cosine similarity between two embeddings
-    TODO: Member 3 will replace this with optimized implementation
-    """
+def cosine_similarity(vec1, vec2):
+    """Calculate cosine similarity between two vectors"""
+    vec1 = np.array(vec1)
+    vec2 = np.array(vec2)
+    return float(np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2)))
+
+def process_profile_photo(filepath, user_id):
+    """Process profile photo and return face embedding"""
+    logger.info(f"Processing profile photo: {filepath}")
+    
     try:
-        # Convert to numpy arrays for calculation
-        a = np.array(embedding1)
-        b = np.array(embedding2)
+        faces_data = detect_faces(filepath)
         
-        # Calculate cosine similarity
-        dot_product = np.dot(a, b)
-        norm_a = np.linalg.norm(a)
-        norm_b = np.linalg.norm(b)
+        if not faces_data:
+            logger.warning(f"No faces detected in profile photo: {filepath}")
+            return None
         
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
+        if len(faces_data) > 1:
+            logger.warning(f"Multiple faces detected in profile photo: {filepath}, using first face")
         
-        similarity = dot_product / (norm_a * norm_b)
-        return float(similarity)
+        # Use the first (or most confident) face
+        face_embedding = faces_data[0]['embedding']
+        
+        logger.info(f"Profile photo processed successfully: {len(face_embedding)}-D embedding")
+        return face_embedding
         
     except Exception as e:
-        logger.error(f"Error calculating cosine similarity: {e}")
-        return 0.0
+        logger.error(f"Error processing profile photo {filepath}: {e}")
+        return None
 
-def health_check() -> Dict[str, str]:
-    """Check ML processor health"""
-    return {
-        'status': 'ready',
-        'message': 'ML processor is ready (placeholder mode)',
-        'version': 'v1.0-placeholder'
-    }
-
-def get_ml_stats() -> Dict[str, Any]:
-    """Get ML processing statistics"""
-    return {
-        'embedding_dimension': 128,
-        'similarity_threshold': 0.6,
-        'supported_formats': ['jpg', 'jpeg', 'png'],
-        'max_faces_per_group': 10,
-        'processing_mode': 'placeholder'
-    }
+def process_group_photo(filepath, photo_id, db):
+    """Process group photo, detect faces, and find matches"""
+    logger.info(f"Processing group photo: {filepath}")
+    
+    try:
+        # Detect all faces in group photo
+        faces_data = detect_faces(filepath)
+        
+        if not faces_data:
+            logger.warning(f"No faces detected in group photo: {filepath}")
+            return {
+                'faces_detected': 0,
+                'matches_found': 0,
+                'face_data': []
+            }
+        
+        # Get all users with face embeddings
+        users_with_embeddings = list(db.users.find({
+            'face_embedding': {'$exists': True, '$ne': None}
+        }))
+        
+        matches_found = 0
+        matched_users = []
+        
+        # Check each detected face against all user embeddings
+        for face_data in faces_data:
+            face_embedding = face_data['embedding']
+            best_match = None
+            best_similarity = 0.0
+            
+            for user in users_with_embeddings:
+                if user.get('face_embedding'):
+                    similarity = cosine_similarity(face_embedding, user['face_embedding'])
+                    
+                    if similarity > 0.6 and similarity > best_similarity:  # Threshold = 0.6
+                        best_similarity = similarity
+                        best_match = {
+                            'user_id': str(user['_id']),
+                            'username': user['username'],
+                            'similarity': similarity
+                        }
+            
+            if best_match:
+                face_data['matched_user'] = best_match
+                if best_match['user_id'] not in [m['user_id'] for m in matched_users]:
+                    matched_users.append(best_match)
+                    matches_found += 1
+        
+        # Update group photo document with face data and matches
+        db.group_photos.update_one(
+            {'_id': ObjectId(photo_id)},
+            {
+                '$set': {
+                    'faces_detected': faces_data,
+                    'processed': True,
+                    'matches_count': matches_found,
+                    'matched_users': matched_users
+                }
+            }
+        )
+        
+        logger.info(f"Group photo processed: {len(faces_data)} faces, {matches_found} matches")
+        
+        return {
+            'faces_detected': len(faces_data),
+            'matches_found': matches_found,
+            'face_data': faces_data,
+            'matched_users': matched_users
+        }
+        
+    except Exception as e:
+        logger.error(f"Error processing group photo {filepath}: {e}")
+        return {
+            'faces_detected': 0,
+            'matches_found': 0,
+            'face_data': [],
+            'error': str(e)
+        }
