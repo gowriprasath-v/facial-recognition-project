@@ -25,24 +25,42 @@ def initialize_ml_models():
         logger.error(f"❌ Error initializing MTCNN: {e}")
         detector = None
 
-    # Try to load FaceNet model (optional)
+    # Try to load FaceNet model
     try:
         from keras.models import load_model
         import keras
         
-        model_path = os.path.join('models', 'facenet_keras.h5')
-        if os.path.exists(model_path):
-            # Try to enable unsafe deserialization
-            try:
-                keras.config.enable_unsafe_deserialization()
-            except:
-                pass
-            
-            model = load_model(model_path, safe_mode=False)
-            logger.info("✅ FaceNet model loaded successfully")
-        else:
+        # Try multiple possible paths for the model
+        possible_paths = [
+            'facenet_keras.h5',
+            'models/facenet_keras.h5', 
+            'app/models/facenet_keras.h5',
+            os.path.join(os.path.dirname(__file__), '..', '..', 'facenet_keras.h5'),
+            os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'facenet_keras.h5')
+        ]
+        
+        model_loaded = False
+        for model_path in possible_paths:
+            if os.path.exists(model_path):
+                try:
+                    # Try to enable unsafe deserialization
+                    try:
+                        keras.config.enable_unsafe_deserialization()
+                    except:
+                        pass
+                    
+                    model = load_model(model_path, safe_mode=False)
+                    logger.info(f"✅ FaceNet model loaded successfully from: {model_path}")
+                    model_loaded = True
+                    break
+                except Exception as load_error:
+                    logger.warning(f"⚠️ Failed to load model from {model_path}: {load_error}")
+                    continue
+        
+        if not model_loaded:
             model = None
-            logger.warning("⚠️ FaceNet model not found at models/facenet_keras.h5 - using dummy embeddings")
+            logger.warning("⚠️ FaceNet model not found in any expected location - using dummy embeddings")
+            
     except Exception as e:
         logger.warning(f"⚠️ FaceNet not available: {e} - using dummy embeddings")
         model = None
@@ -51,23 +69,29 @@ def initialize_ml_models():
 initialize_ml_models()
 
 def preprocess_face(face_img):
-    """Preprocess face for FaceNet input"""
+    """Preprocess face for FaceNet input - Updated with standalone logic"""
     try:
         if face_img is None or face_img.size == 0:
             return np.zeros((160, 160, 3))
             
+        # Resize to FaceNet input size
         face_resized = cv2.resize(face_img, (160, 160))
+        
+        # Normalize to [0, 1]
         face_normalized = face_resized.astype('float32') / 255.0
+        
+        # Standardize (zero mean, unit variance)
         mean, std = face_normalized.mean(), face_normalized.std()
         if std > 0:
             face_normalized = (face_normalized - mean) / std
+            
         return face_normalized
     except Exception as e:
         logger.error(f"Error preprocessing face: {e}")
         return np.zeros((160, 160, 3))
 
 def get_embedding(face_pixels):
-    """Get face embedding from FaceNet model"""
+    """Get face embedding from FaceNet model - Updated with standalone logic"""
     try:
         if model is None:
             # Return consistent dummy embedding based on face pixels
@@ -75,10 +99,18 @@ def get_embedding(face_pixels):
             np.random.seed(abs(face_hash) % 2147483647)
             return np.random.random(128).tolist()
         
+        # Ensure correct data type
         face_pixels = face_pixels.astype('float32')
+        
+        # Add batch dimension
         sample = np.expand_dims(face_pixels, axis=0)
+        
+        # Get embedding from model
         embedding = model.predict(sample, verbose=0)
+        
+        # Return as list for JSON serialization
         return embedding[0].tolist()
+        
     except Exception as e:
         logger.error(f"Error getting embedding: {e}")
         # Fallback dummy embedding
@@ -86,7 +118,7 @@ def get_embedding(face_pixels):
         return np.random.random(128).tolist()
 
 def detect_faces(image_path):
-    """Detect faces in image and return face data"""
+    """Detect faces in image and return face data - Updated with standalone logic"""
     logger.info(f"🔍 Starting face detection for: {image_path}")
     
     if detector is None:
@@ -109,11 +141,11 @@ def detect_faces(image_path):
         
         logger.info(f"✅ Image loaded successfully. Shape: {image.shape}")
         
-        # Convert BGR to RGB
+        # Convert BGR to RGB (like standalone script)
         rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         logger.info("✅ Image converted to RGB")
         
-        # Detect faces
+        # Detect faces using MTCNN
         logger.info("🔍 Running MTCNN face detection...")
         results = detector.detect_faces(rgb_image)
         
@@ -141,7 +173,7 @@ def detect_faces(image_path):
                     logger.warning(f"⚠️ Invalid face dimensions for face {i}: {w}x{h}")
                     continue
                 
-                # Extract face
+                # Extract face region (like standalone script)
                 face = rgb_image[y:y+h, x:x+w]
                 logger.info(f"✅ Face {i} extracted. Shape: {face.shape}")
                 
@@ -169,18 +201,23 @@ def detect_faces(image_path):
         return []
 
 def cosine_similarity(vec1, vec2):
-    """Calculate cosine similarity between two vectors"""
+    """Calculate cosine similarity between two vectors - Updated with standalone logic"""
     try:
         vec1 = np.array(vec1)
         vec2 = np.array(vec2)
         
+        # Calculate norms
         norm1 = np.linalg.norm(vec1)
         norm2 = np.linalg.norm(vec2)
         
+        # Avoid division by zero
         if norm1 == 0 or norm2 == 0:
             return 0.0
-            
-        return float(np.dot(vec1, vec2) / (norm1 * norm2))
+        
+        # Calculate cosine similarity
+        similarity = np.dot(vec1, vec2) / (norm1 * norm2)
+        return float(similarity)
+        
     except Exception as e:
         logger.error(f"Error calculating cosine similarity: {e}")
         return 0.0
@@ -217,7 +254,7 @@ def process_profile_photo(filepath, user_id):
         return None
 
 def process_group_photo(filepath, photo_id, db):
-    """Process group photo, detect faces, and find matches"""
+    """Process group photo, detect faces, and find matches - Updated with better similarity logic"""
     logger.info(f"👥 Processing group photo: {filepath}")
     
     try:
@@ -255,7 +292,8 @@ def process_group_photo(filepath, photo_id, db):
                 if user.get('face_embedding'):
                     similarity = cosine_similarity(face_embedding, user['face_embedding'])
                     
-                    if similarity > 0.5 and similarity > best_similarity:  # Threshold = 0.5
+                    # Updated threshold - you can adjust this
+                    if similarity > 0.6 and similarity > best_similarity:  # Raised threshold to 0.6
                         best_similarity = similarity
                         best_match = {
                             'user_id': str(user['_id']),
@@ -316,5 +354,42 @@ def test_ml_setup():
         'mtcnn_available': detector is not None,
         'facenet_available': model is not None,
         'opencv_available': True,  # If we got here, CV2 is working
+        'model_path': 'facenet_keras.h5' if model is not None else 'not found',
         'status': 'ML components initialized'
     }
+
+# Additional utility function from standalone script logic
+def find_matching_photos_batch(profile_embedding, group_photos_folder, threshold=0.6):
+    """Batch process multiple group photos against a profile embedding"""
+    matches = []
+    
+    if not os.path.exists(group_photos_folder):
+        logger.error(f"Group photos folder not found: {group_photos_folder}")
+        return matches
+    
+    for photo_name in os.listdir(group_photos_folder):
+        if photo_name.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif')):
+            photo_path = os.path.join(group_photos_folder, photo_name)
+            
+            try:
+                faces_data = detect_faces(photo_path)
+                
+                for face_data in faces_data:
+                    similarity = cosine_similarity(profile_embedding, face_data['embedding'])
+                    
+                    if similarity > threshold:
+                        matches.append({
+                            'photo_name': photo_name,
+                            'photo_path': photo_path,
+                            'similarity': round(similarity, 3),
+                            'face_bbox': face_data['bbox'],
+                            'face_confidence': face_data['confidence']
+                        })
+                        logger.info(f"✅ Match found in {photo_name}: similarity {similarity:.3f}")
+                        break  # Only need one match per photo
+                        
+            except Exception as e:
+                logger.error(f"❌ Error processing {photo_name}: {e}")
+                continue
+    
+    return matches
