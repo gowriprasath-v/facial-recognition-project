@@ -6,6 +6,7 @@ import uuid
 from pymongo import MongoClient
 from bson import ObjectId
 from app.utils.ml_processor import process_profile_photo, process_group_photo, test_ml_setup
+from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -219,7 +220,6 @@ def upload_group():
         logger.info(f"✅ Group photo saved: {filepath}")
         
         # Create group photo document in database
-        from datetime import datetime
         group_photo_doc = {
             'filename': filename,
             'uploaded_by': ObjectId(user_id),
